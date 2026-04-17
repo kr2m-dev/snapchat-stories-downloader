@@ -327,6 +327,12 @@ HTML_INTERFACE = """
             </div>
             
             <div class="input-group">
+                <label for="cookies">🍪 Fichier cookies JSON (optionnel mais recommandé)</label>
+                <input type="file" id="cookies" accept=".json" style="padding: 10px; background: rgba(0,0,0,0.3); border: 2px dashed rgba(255,255,255,0.2); border-radius: 10px; color: #fff; width: 100%;">
+                <small style="color: #888; display: block; margin-top: 5px;">Sans cookies, le téléchargement échouera probablement. Voir COOKIES_GUIDE.md</small>
+            </div>
+            
+            <div class="input-group">
                 <label for="username">👤 Nom personnalisé (optionnel)</label>
                 <input type="text" id="username" placeholder="Laissez vide pour auto-détection">
             </div>
@@ -391,53 +397,75 @@ HTML_INTERFACE = """
         let statusInterval = null;
         let logsInterval = null;
         
-        async function startDownload() {
-            const url = document.getElementById('url').value.trim();
-            const username = document.getElementById('username').value.trim();
-            const merge = document.getElementById('merge').checked;
-            const transitions = document.getElementById('transitions').checked;
-            const keepIndividual = document.getElementById('keepIndividual').checked;
+async function startDownload() {
+    const url = document.getElementById('url').value.trim();
+    const username = document.getElementById('username').value.trim();
+    const merge = document.getElementById('merge').checked;
+    const transitions = document.getElementById('transitions').checked;
+    const keepIndividual = document.getElementById('keepIndividual').checked;
+    const cookiesFile = document.getElementById('cookies').files[0];
+
+    if (!url) {
+        showStatus('Veuillez entrer une URL', 'error');
+        return;
+    }
+
+    const btn = document.getElementById('downloadBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Téléchargement en cours...';
+    showStatus('Téléchargement démarré côté serveur...', 'loading');
+
+    try {
+        // Upload cookies si fourni
+        if (cookiesFile) {
+            showStatus('Upload des cookies...', 'loading');
+            const cookiesForm = new FormData();
+            cookiesForm.append('file', cookiesFile);
             
-            if (!url) {
-                showStatus('Veuillez entrer une URL', 'error');
-                return;
-            }
+            const cookiesResponse = await fetch('/api/cookies', {
+                method: 'POST',
+                body: cookiesForm
+            });
             
-            const btn = document.getElementById('downloadBtn');
-            btn.disabled = true;
-            btn.textContent = '⏳ Téléchargement en cours...';
-            showStatus('Téléchargement démarré côté serveur...', 'loading');
-            
-            try {
-                const response = await fetch('/api/download', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        url: url,
-                        username: username,
-                        merge: merge,
-                        transitions: transitions,
-                        keep_individual: keepIndividual
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    downloadId = data.download_id;
-                    showStatus(`Téléchargement démarré! ID: ${downloadId}`, 'loading');
-                    startStatusPolling();
-                } else {
-                    showStatus(data.error || 'Erreur inconnue', 'error');
-                    btn.disabled = false;
-                    btn.textContent = '🚀 Lancer le téléchargement';
-                }
-            } catch (error) {
-                showStatus('Erreur de connexion au serveur', 'error');
+            const cookiesData = await cookiesResponse.json();
+            if (!cookiesData.success) {
+                showStatus('Erreur upload cookies: ' + cookiesData.error, 'error');
                 btn.disabled = false;
                 btn.textContent = '🚀 Lancer le téléchargement';
+                return;
             }
+            showStatus('Cookies uploadés, démarrage du téléchargement...', 'loading');
         }
+
+        const response = await fetch('/api/download', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                url: url,
+                username: username,
+                merge: merge,
+                transitions: transitions,
+                keep_individual: keepIndividual
+            })
+        });
+
+        const data = await response.json();
+
+        if (data.success) {
+            downloadId = data.download_id;
+            showStatus(`Téléchargement démarré! ID: ${downloadId}`, 'loading');
+            startStatusPolling();
+        } else {
+            showStatus(data.error || 'Erreur inconnue', 'error');
+            btn.disabled = false;
+            btn.textContent = '🚀 Lancer le téléchargement';
+        }
+    } catch (error) {
+        showStatus('Erreur de connexion au serveur', 'error');
+        btn.disabled = false;
+        btn.textContent = '🚀 Lancer le téléchargement';
+    }
+}
         
         function startStatusPolling() {
             if (statusInterval) clearInterval(statusInterval);
@@ -565,11 +593,26 @@ def download_worker(download_id: str, url: str, options: dict):
     downloads[download_id]['progress'] = 10
     
     try:
+        # Vérifier si un fichier cookies a été uploadé
+        cookies_file = options.get('cookies_file')
+        if not cookies_file:
+            # Chercher un fichier cookies.json dans le dossier
+            potential_files = ['snapchat_cookies.json', 'cookies.json']
+            for f in potential_files:
+                if Path(f).exists():
+                    cookies_file = f
+                    break
+        
         # Créer le downloader
-        downloader = SnapchatDownloader(
-            output_dir=str(DOWNLOAD_DIR),
-            headless=True
-        )
+        downloader_kwargs = {
+            'output_dir': str(DOWNLOAD_DIR),
+            'headless': True
+        }
+        if cookies_file and Path(cookies_file).exists():
+            downloader_kwargs['cookies_file'] = cookies_file
+            logger.info(f"[Worker {download_id}] Cookies trouvés: {cookies_file}")
+        
+        downloader = SnapchatDownloader(**downloader_kwargs)
         
         # Télécharger
         success = downloader.download_sync(url, max_concurrent=MAX_CONCURRENT)
@@ -741,6 +784,47 @@ def health_check():
         'timestamp': datetime.now().isoformat(),
         'downloads_active': sum(1 for d in downloads.values() if d['status'] in ['pending', 'downloading'])
     })
+
+
+@app.route('/api/cookies', methods=['POST'])
+def upload_cookies():
+    """Upload un fichier cookies JSON"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'success': False, 'error': 'Aucun fichier fourni'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'success': False, 'error': 'Nom de fichier vide'}), 400
+        
+        if not file.filename.endswith('.json'):
+            return jsonify({'success': False, 'error': 'Le fichier doit être au format JSON'}), 400
+        
+        # Sauvegarder le fichier
+        filename = 'snapchat_cookies.json'
+        filepath = Path(filename)
+        file.save(filepath)
+        
+        # Vérifier que c'est un JSON valide
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+                if not isinstance(data, list):
+                    return jsonify({'success': False, 'error': 'Format JSON invalide - attendu une liste'}), 400
+        except json.JSONDecodeError:
+            filepath.unlink()
+            return jsonify({'success': False, 'error': 'Fichier JSON invalide'}), 400
+        
+        logger.info(f"Cookies uploadés: {filepath.absolute()}")
+        return jsonify({
+            'success': True,
+            'message': 'Cookies sauvegardés avec succès',
+            'filename': filename
+        })
+    
+    except Exception as e:
+        logger.error(f"Erreur upload cookies: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 
 def main():
