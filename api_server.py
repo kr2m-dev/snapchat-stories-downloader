@@ -30,7 +30,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Import du downloader
-from selenium_downloader import SeleniumSnapchatDownloader
+try:
+    from snapchat_pro_downloader import SnapchatProDownloader as SnapchatDownloader
+    logger.info("Using PRO downloader with direct scraping")
+except ImportError:
+    from selenium_downloader import SeleniumSnapchatDownloader as SnapchatDownloader
+    logger.info("Using Selenium downloader")
 from video_merger import VideoMerger
 
 app = Flask(__name__)
