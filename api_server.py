@@ -565,8 +565,8 @@ def download_worker(download_id: str, url: str, options: dict):
     downloads[download_id]['progress'] = 10
     
     try:
-        # Créer le downloader Selenium
-        downloader = SeleniumSnapchatDownloader(
+        # Créer le downloader
+        downloader = SnapchatDownloader(
             output_dir=str(DOWNLOAD_DIR),
             headless=True
         )
